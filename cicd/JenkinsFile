@@ -1,0 +1,115 @@
+#!/usr/bin/env groovy
+@Library(value="DevOpsStepLibrary", changelog=false) _
+pipeline
+{
+	environment
+	{
+       	JENKINS_FOLDER = "C:\\Jenkins"
+		/* CRM Repo Info */
+		CRM_GIT_REPO_URL = "${params.GIT_REPO}"
+		CRM_GIT_BRANCH = "${params.GIT_BRANCH}"
+		
+		CRM_PACKAGE_NAME = "Subway.FranchiseSales.CRM"
+		NUGET_PACKAGE = "Subway.FranchiseSales.CRM*"
+		OCTOPUS_PROJECT_NAME = "Franchise Sales-CRM"
+		BYPASS_WHITEHAT_SCAN = true
+	}
+    agent
+	{         
+		node
+    	{
+			label 'PHL-DU-DOBA10.DEVFWH.LAN'
+		    customWorkspace  "C:\\crm"
+    	}
+	}
+	stages {		
+		stage('clean WorkSpace')
+		{
+			steps
+			{
+				executePreActions()             
+			}
+		}    
+		stage('Checkout') 
+		{ 
+			steps 
+			{
+				gitBranchCheckout(CRM_GIT_REPO_URL, CRM_GIT_BRANCH, WORKSPACE)				
+				script
+				{
+					folder_name = "Version $versionnumber"
+				}
+			}
+		}	
+		stage('Preparation')
+		{
+			steps 
+			{ 
+				powershell "Expand-Archive -LiteralPath $WORKSPACE\\$folder_name\\Subway.FST.Assets_CRM_Changes.zip -DestinationPath $WORKSPACE\\Subway.FST.CRM\\Subway.FST.CRM_Assets"
+				powershell "Expand-Archive -LiteralPath $WORKSPACE\\$folder_name\\Subway.FST.Data_CRM_Changes.zip -DestinationPath $WORKSPACE\\Subway.FST.CRM\\Subway.FST.CRM_Changes"
+				powershell "Copy-Item $WORKSPACE\\CRMImportPackage.ps1 -Destination $WORKSPACE\\Subway.FranchiseSales.CRM"
+				powershell "Copy-Item $WORKSPACE\\$folder_name\\Subway.FST.Pre_CRM_Changes -Destination $WORKSPACE\\Subway.FranchiseSales.CRM -Recurse"
+				powershell "Copy-Item $WORKSPACE\\$folder_name\\Subway.FST.Post_CRM_Changes -Destination $WORKSPACE\\Subway.FranchiseSales.CRM -Recurse"
+			}
+		}
+		stage('Packing')
+		{
+			steps
+			{
+				packageBuild("$Slave_Tools\\Octopus\\Octo.exe", CRM_PACKAGE_NAME, "${versionnumber}", "$WORKSPACE\\Subway.FranchiseSales.CRM", WORKSPACE)
+			}
+		}
+		stage('Upload Artifacts')
+		{
+			steps 
+			{
+				uploadArtifactsToArtifactory(NUGET_PACKAGE, "Subway_nuget/Subway.FranchiseSales/")				
+			}		
+		}		
+		stage('Deployment') 
+		{
+			steps 
+			{					
+				script
+				{
+					def releaseParams = new String[4]
+					releaseParams[0] = "--project=\"${OCTOPUS_PROJECT_NAME}\"" as String 
+					releaseParams[1] = "--releaseNumber=${versionnumber}" as String 
+					releaseParams[2] = "--packageVersion=${versionnumber}" as String 						                    		
+					releaseParams[3] = "--server=https://phl-octopus.subwaydai.com"
+					createOctopusRelease("${JENKINS_FOLDER}\\Tools\\Octopus\\Octo.exe",  releaseParams)
+				}
+			}
+		}	
+        stage('Quality Gates') 
+		{
+            steps
+            {
+			    runQualityGatesScans(CRM_GIT_REPO_URL, CRM_GIT_BRANCH)
+            }
+		}
+		stage('Repository Check')
+		{	
+			when {
+				expression	{ scm.userRemoteConfigs[0].url == "https://subwaytechnology.visualstudio.com/DefaultCollection/DevOps/_git/JenkinsConfigs"	||  scm.userRemoteConfigs[0].url == "https://subwaytechnology.visualstudio.com/DefaultCollection/DevOps%20Shared%20Services/_git/Subway.JenkinsFiles"	}
+				}
+			steps
+			{
+				script
+				{
+					emailext body: 'Jenkins Project: "$JOB_BASE_NAME" - Build $BUILD_NUMBER $BUILD_URL is using jenkinsFile from devops shared repository, Please update the Job to point to jenkinsFile in Source Code repository.	Thanks - Devops Team', subject: '$JOB_BASE_NAME Jenkins job status', to: 'devops@subway.com'
+				}
+			}
+		}
+	}
+	options {
+        buildDiscarder(logRotator(daysToKeepStr: '30', numToKeepStr: '5')) 
+    }
+	post 
+    {
+        always
+        {
+            executePostActions()			
+        }		    
+    }		
+}
